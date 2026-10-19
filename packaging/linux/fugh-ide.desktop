@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Fugh
+Comment=Desktop IDE for C++ and C# projects
+Exec=fugh-ide
+Terminal=false
+Categories=Development;IDE;
+Keywords=code;editor;C++;C#;development;
+StartupNotify=true
+StartupWMClass=Fugh
