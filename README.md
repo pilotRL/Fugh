@@ -1,6 +1,34 @@
 # Fugh IDE
 
-<p align="center"><img src="assets/devicon/fugh-logo.png" alt="Fugh logo" width="96"></p>
+<p align="center">
+  <img src="assets/devicon/fugh-logo.png" alt="Fugh logo" width="110">
+</p>
+
+<p align="center">
+  A Linux desktop IDE for <strong>C++</strong> and <strong>C#</strong>, built with Rust, <code>eframe</code>, and <code>egui</code>.
+</p>
+
+<p align="center">
+  <a href="https://github.com/pilotRL/Fugh">
+    <img src="https://img.shields.io/badge/Platform-Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Linux">
+  </a>
+  <a href="https://www.rust-lang.org/">
+    <img src="https://img.shields.io/badge/Built%20with-Rust-orange?style=for-the-badge&logo=rust&logoColor=white" alt="Rust">
+  </a>
+  <a href="https://github.com/pilotRL/Fugh/blob/main/LICENSE">
+    <img src="https://img.shields.io/badge/License-GPL--3.0-blue?style=for-the-badge" alt="GPL-3.0">
+  </a>
+</p>
+
+<p align="center">
+  <a href="#what-it-can-do">Features</a> •
+  <a href="#requirements">Requirements</a> •
+  <a href="#build-and-run-from-source">Build</a> •
+  <a href="#install-for-your-linux-user">Installation</a> •
+  <a href="#current-limitations">Limitations</a>
+</p>
+
+---
 
 Fugh is a Linux desktop IDE for **C++** and **C#**, built with Rust, `eframe`, and `egui`. It brings project browsing, source editing, language tools, build commands, and debugging into one application. Fugh is under active development; support varies by language and project type.
 
@@ -40,6 +68,8 @@ Imported Visual Studio `.vcxproj` files can be browsed and edited, but Fugh's bu
 - A lightweight Avalonia designer for a subset of XAML controls. It is not a live application preview.
 - Startup splash and a Fugh application icon.
 
+---
+
 ## Requirements
 
 Fugh is developed and packaged for Linux desktop environments. Building Fugh from source requires Rust and the native GUI development libraries for `eframe`/`egui`. The current `Cargo.toml` requires Rust 1.95 or newer.
@@ -57,8 +87,8 @@ Install Rust with [rustup](https://rustup.rs/) if needed. C# projects also requi
 ## Build and run from source
 
 ```bash
-git clone https://github.com/pilotRL/Coding-Studio.git
-cd Coding-Studio
+git clone https://github.com/pilotRL/Fugh.git
+cd Fugh
 cargo build --release
 cargo run --release
 ```
@@ -93,4 +123,12 @@ The Linux desktop entry is named `io.github.pilotrl.fugh.desktop` to match the l
 - Package-management helpers are Fedora-specific.
 - Rust currently has editor syntax highlighting only; Rust project creation and build/debug workflows are not implemented.
 
-Report bugs and missing features through the [Coding Studio issue tracker](https://github.com/pilotRL/Coding-Studio/issues).
+---
+
+## Contributing and bug reports
+
+Report bugs and missing features through the [Fugh issue tracker](https://github.com/pilotRL/Fugh/issues).
+
+<p align="center">
+  <a href="https://github.com/pilotRL/Fugh">View Fugh on GitHub</a>
+</p>
