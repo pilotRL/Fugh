@@ -1,7 +1,7 @@
 # Fugh IDE
 
 <p align="center">
-  <img src="assets/fugh-logo.png" alt="Fugh IDE logo" width="120" />
+  <img src="assets/devicon/fugh-logo.png" alt="Fugh IDE logo" width="120" />
 </p>
 
 <h3 align="center">A modern IDE for C++ and C# on Linux</h3>
@@ -11,12 +11,11 @@
 </p>
 
 <p align="center">
-  <!-- Replace OWNER/REPO with your GitHub username and repository name. -->
-  <a href="https://github.com/OWNER/REPO/releases"><img src="https://img.shields.io/github/v/release/OWNER/REPO?display_name=tag&label=release" alt="Latest release"></a>
-  <a href="https://github.com/OWNER/REPO/blob/main/LICENSE"><img src="https://img.shields.io/github/license/OWNER/REPO" alt="License"></a>
-  <a href="https://github.com/OWNER/REPO/stargazers"><img src="https://img.shields.io/github/stars/OWNER/REPO?style=flat" alt="GitHub stars"></a>
-  <a href="https://github.com/OWNER/REPO/issues"><img src="https://img.shields.io/github/issues/OWNER/REPO" alt="Open issues"></a>
-  <a href="https://github.com/OWNER/REPO/commits/main"><img src="https://img.shields.io/github/last-commit/OWNER/REPO" alt="Last commit"></a>
+  <a href="https://github.com/pilotRL/Fugh/releases"><img src="https://img.shields.io/github/v/release/pilotRL/Fugh?display_name=tag&label=release" alt="Latest release"></a>
+  <a href="https://github.com/pilotRL/Fugh/blob/main/LICENSE"><img src="https://img.shields.io/github/license/pilotRL/Fugh" alt="License"></a>
+  <a href="https://github.com/pilotRL/Fugh/stargazers"><img src="https://img.shields.io/github/stars/pilotRL/Fugh?style=flat" alt="GitHub stars"></a>
+  <a href="https://github.com/pilotRL/Fugh/issues"><img src="https://img.shields.io/github/issues/pilotRL/Fugh" alt="Open issues"></a>
+  <a href="https://github.com/pilotRL/Fugh/commits/main"><img src="https://img.shields.io/github/last-commit/pilotRL/Fugh" alt="Last commit"></a>
   <img src="https://img.shields.io/badge/platform-Linux-informational" alt="Platform">
   <img src="https://img.shields.io/badge/status-early%20development-orange" alt="Project status">
 </p>
