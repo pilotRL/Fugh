@@ -42,7 +42,7 @@ jobs:
         run: bash -n packaging/linux/install-user.sh
 
       - name: Validate Linux desktop entry
-        run: desktop-file-validate packaging/linux/fugh-ide.desktop
+        run: desktop-file-validate packaging/linux/io.github.pilotrl.fugh.desktop packaging/linux/io.github.pilotrl.fughsplash.desktop
 
       - name: Run tests
         run: cargo test --locked

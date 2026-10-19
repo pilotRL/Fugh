@@ -64,7 +64,7 @@ pub struct ProjectProperties {
     pub csharp: CSharpProjectProperties,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CppProjectProperties {
     /// Selected CMake build configuration (Debug, Release, or a custom name).
@@ -85,7 +85,25 @@ pub struct CppProjectProperties {
     pub runtime_files: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+impl Default for CppProjectProperties {
+    fn default() -> Self {
+        Self {
+            build_configuration: "Debug".to_owned(),
+            platform: "Host".to_owned(),
+            standard: String::new(),
+            include_directories: Vec::new(),
+            library_directories: Vec::new(),
+            libraries: Vec::new(),
+            definitions: Vec::new(),
+            compiler_options: Vec::new(),
+            linker_options: Vec::new(),
+            runtime_library_directories: Vec::new(),
+            runtime_files: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CSharpProjectProperties {
     /// Selected MSBuild configuration (Debug, Release, or a custom name).
@@ -103,6 +121,38 @@ pub struct CSharpProjectProperties {
     pub treat_warnings_as_errors: String,
     pub nuget_packages: Vec<NuGetPackageReference>,
     pub assembly_references: Vec<String>,
+}
+
+impl Default for CSharpProjectProperties {
+    fn default() -> Self {
+        Self {
+            build_configuration: "Debug".to_owned(),
+            // Empty lets MSBuild use the project's PlatformTarget (Any CPU by
+            // default) instead of overriding a target already set in .csproj.
+            platform_target: String::new(),
+            target_framework: String::new(),
+            runtime_identifier: String::new(),
+            assembly_name: String::new(),
+            root_namespace: String::new(),
+            language_version: String::new(),
+            nullable: String::new(),
+            implicit_usings: String::new(),
+            treat_warnings_as_errors: String::new(),
+            nuget_packages: Vec::new(),
+            assembly_references: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct FughProjectManifest {
+    #[serde(default)]
+    format: String,
+    version: u32,
+    project_path: PathBuf,
+    #[serde(default)]
+    project_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -399,6 +449,37 @@ impl Workspace {
                 .map(str::to_ascii_lowercase)
                 .as_deref()
             {
+                Some("fugh") => {
+                    let manifest_contents = fs::read_to_string(&path).map_err(|error| {
+                        format!("Could not read Fugh project '{}': {error}", path.display())
+                    })?;
+                    let manifest: FughProjectManifest = serde_json::from_str(&manifest_contents)
+                        .map_err(|error| {
+                            format!("Invalid Fugh project file '{}': {error}", path.display())
+                        })?;
+                    if !manifest.format.is_empty() && manifest.format != "fugh-project" {
+                        return Err(format!(
+                            "File '{}' is not a Fugh project manifest.",
+                            path.display()
+                        ));
+                    }
+                    if manifest.version != 1 {
+                        return Err(format!(
+                            "Fugh project '{}' uses unsupported manifest version {}.",
+                            path.display(),
+                            manifest.version
+                        ));
+                    }
+                    let root = path
+                        .parent()
+                        .ok_or_else(|| "Fugh project folder could not be resolved.".to_owned())?
+                        .join(manifest.project_path);
+                    let target = manifest
+                        .project_file
+                        .map(|project_file| root.join(project_file))
+                        .unwrap_or(root);
+                    return self.open_project(&target);
+                }
                 Some("sln" | "slnx") => {
                     let solution = fs::read_to_string(&path).map_err(|error| {
                         format!("Could not read solution '{}': {error}", path.display())
@@ -458,6 +539,25 @@ impl Workspace {
             }
             Err(error) => Some(error),
         };
+        if info.language == ProjectLanguage::CSharp
+            && info.properties.csharp.platform_target.trim().is_empty()
+        {
+            let project_file = info.project_file.as_ref().map_or_else(
+                || info.path.join(format!("{}.csproj", info.name)),
+                |relative| info.path.join(relative),
+            );
+            if let Ok(contents) = fs::read_to_string(project_file)
+                && let Ok(document) = roxmltree::Document::parse(&contents)
+                && let Some(platform_target) = document
+                    .descendants()
+                    .find(|node| node.tag_name().name() == "PlatformTarget")
+                    .and_then(|node| node.text())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            {
+                info.properties.csharp.platform_target = platform_target.to_owned();
+            }
+        }
         let files = source_files(&info.path)?;
         let directories = project_directories(&info.path)?;
         if files.is_empty() {
@@ -479,7 +579,14 @@ impl Workspace {
         self.selected_document = 0;
         self.message = properties_load_error.unwrap_or_else(|| "Project opened".to_owned());
         self.open_file(&entry_file)?;
-        self.refresh_symbols()
+        self.refresh_symbols()?;
+        if let Err(error) =
+            write_fugh_project_manifest(self.current.as_ref().expect("project was set above"))
+        {
+            self.message =
+                format!("Project opened, but its .fugh file could not be saved: {error}");
+        }
+        Ok(())
     }
 
     pub fn save_current_project_properties(&mut self) -> Result<(), String> {
@@ -1492,6 +1599,55 @@ fn detect_project(path: &Path) -> Result<ProjectInfo, String> {
 
 pub fn project_properties_file(project_root: &Path) -> PathBuf {
     project_root.join(".fugh").join("project-properties.json")
+}
+
+fn write_fugh_project_manifest(project: &ProjectInfo) -> Result<(), String> {
+    let mut safe_name = project
+        .path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&project.name)
+        .to_owned();
+    for character in ['/', '\\', ':', '*', '?', '"', '<', '>', '|'] {
+        safe_name = safe_name.replace(character, "_");
+    }
+    let manifest_path = project.path.join(format!("{safe_name}.fugh"));
+    if manifest_path.exists() {
+        // Upgrade manifests created before the MIME-identifying format field
+        // was added. Leave unrelated or user-authored .fugh files untouched.
+        if let Ok(existing) = fs::read(&manifest_path)
+            && let Ok(mut manifest) = serde_json::from_slice::<FughProjectManifest>(&existing)
+            && manifest.version == 1
+            && manifest.project_path == PathBuf::from(".")
+            && manifest.project_file == project.project_file
+            && manifest.format.is_empty()
+        {
+            manifest.format = "fugh-project".to_owned();
+            let contents = serde_json::to_vec_pretty(&manifest)
+                .map_err(|error| format!("Could not serialize Fugh project file: {error}"))?;
+            fs::write(&manifest_path, contents).map_err(|error| {
+                format!(
+                    "Could not update Fugh project file '{}': {error}",
+                    manifest_path.display()
+                )
+            })?;
+        }
+        return Ok(());
+    }
+    let manifest = FughProjectManifest {
+        format: "fugh-project".to_owned(),
+        version: 1,
+        project_path: PathBuf::from("."),
+        project_file: project.project_file.clone(),
+    };
+    let contents = serde_json::to_vec_pretty(&manifest)
+        .map_err(|error| format!("Could not serialize Fugh project file: {error}"))?;
+    fs::write(&manifest_path, contents).map_err(|error| {
+        format!(
+            "Could not write Fugh project file '{}': {error}",
+            manifest_path.display()
+        )
+    })
 }
 
 fn load_project_properties(project_root: &Path) -> Result<ProjectProperties, String> {

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Fugh Startup Splash
+Comment=Fugh startup splash window
+Exec=fugh-ide --fugh-startup-splash
+Icon=fugh-logo
+Terminal=false
+NoDisplay=true
+StartupNotify=false
+StartupWMClass=io.github.pilotrl.fughsplash

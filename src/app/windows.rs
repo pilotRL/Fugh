@@ -1026,8 +1026,8 @@ impl Default for ProjectForm {
 }
 
 fn build_toolbar_settings_ui(ui: &mut egui::Ui, workspace: &mut Workspace) {
-    let changed = workspace.current.as_mut().is_some_and(|project| {
-        let previous = project.properties.clone();
+    let should_save = workspace.current.as_mut().is_some_and(|project| {
+        let mut should_save = false;
         let is_cpp = project.language == ProjectLanguage::Cpp;
         let (configuration, platform) = if is_cpp {
             (
@@ -1040,6 +1040,11 @@ fn build_toolbar_settings_ui(ui: &mut egui::Ui, workspace: &mut Workspace) {
                 &mut project.properties.csharp.platform_target,
             )
         };
+        let custom_dirty_id =
+            ui.make_persistent_id(("build-configuration-custom-dirty", &project.path));
+        let mut custom_configuration_dirty = ui
+            .ctx()
+            .data(|data| data.get_temp::<bool>(custom_dirty_id).unwrap_or(false));
 
         let config_label = if configuration.trim().is_empty() {
             "Debug"
@@ -1047,7 +1052,7 @@ fn build_toolbar_settings_ui(ui: &mut egui::Ui, workspace: &mut Workspace) {
             configuration.as_str()
         };
         egui::ComboBox::from_id_salt("build-configuration-selector")
-            .width(112.0)
+            .width(142.0)
             .selected_text(config_label)
             .show_ui(ui, |ui| {
                 let configurations: &[&str] = if is_cpp {
@@ -1056,18 +1061,45 @@ fn build_toolbar_settings_ui(ui: &mut egui::Ui, workspace: &mut Workspace) {
                     &["Debug", "Release"]
                 };
                 for item in configurations {
-                    ui.selectable_value(configuration, (*item).to_owned(), *item);
+                    if ui
+                        .selectable_value(configuration, (*item).to_owned(), *item)
+                        .clicked()
+                    {
+                        should_save = true;
+                        custom_configuration_dirty = false;
+                    }
                 }
                 ui.separator();
-                ui.label(RichText::new("Custom configuration").small().color(theme::muted()));
-                ui.add(
+                ui.label(
+                    RichText::new("Custom configuration")
+                        .small()
+                        .color(theme::muted()),
+                );
+                let custom_response = ui.add(
                     egui::TextEdit::singleline(configuration)
                         .desired_width(150.0)
                         .hint_text("Type a configuration name"),
                 );
+                if custom_response.changed() {
+                    custom_configuration_dirty = true;
+                }
+                if custom_configuration_dirty
+                    && (custom_response.lost_focus()
+                        || ui.input(|input| input.key_pressed(egui::Key::Enter)))
+                {
+                    should_save = true;
+                    custom_configuration_dirty = false;
+                }
             })
             .response
-            .on_hover_text("Choose a build configuration or enter a custom configuration name.");
+            .on_hover_text(if is_cpp {
+                "Choose a CMake configuration. Custom names need matching configuration flags in CMakeLists.txt."
+            } else {
+                "Choose a .NET configuration or enter a custom configuration name."
+            });
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(custom_dirty_id, custom_configuration_dirty);
+        });
 
         let platform_label = if is_cpp {
             match platform.as_str() {
@@ -1087,14 +1119,31 @@ fn build_toolbar_settings_ui(ui: &mut egui::Ui, workspace: &mut Workspace) {
             .selected_text(platform_label)
             .show_ui(ui, |ui| {
                 if is_cpp {
-                    ui.selectable_value(platform, "Host".to_owned(), "Host");
-                    ui.selectable_value(platform, "x64".to_owned(), "x64");
-                    ui.selectable_value(platform, "x86".to_owned(), "x86");
+                    should_save |= ui
+                        .selectable_value(platform, "Host".to_owned(), "Host")
+                        .clicked();
+                    should_save |= ui
+                        .selectable_value(platform, "x64".to_owned(), "x64")
+                        .clicked();
+                    should_save |= ui
+                        .selectable_value(platform, "x86".to_owned(), "x86")
+                        .clicked();
                 } else {
-                    ui.selectable_value(platform, "AnyCPU".to_owned(), "Any CPU");
-                    ui.selectable_value(platform, "x64".to_owned(), "x64");
-                    ui.selectable_value(platform, "x86".to_owned(), "x86");
-                    ui.selectable_value(platform, "ARM64".to_owned(), "ARM64");
+                    should_save |= ui
+                        .selectable_value(platform, "AnyCPU".to_owned(), "Any CPU")
+                        .clicked();
+                    should_save |= ui
+                        .selectable_value(platform, "x64".to_owned(), "x64")
+                        .clicked();
+                    should_save |= ui
+                        .selectable_value(platform, "x86".to_owned(), "x86")
+                        .clicked();
+                    should_save |= ui
+                        .selectable_value(platform, "ARM64".to_owned(), "ARM64")
+                        .clicked();
+                    should_save |= ui
+                        .selectable_value(platform, "ARM".to_owned(), "ARM")
+                        .clicked();
                 }
             })
             .response
@@ -1103,10 +1152,10 @@ fn build_toolbar_settings_ui(ui: &mut egui::Ui, workspace: &mut Workspace) {
             } else {
                 "C# compiler target architecture passed to MSBuild as PlatformTarget."
             });
-        previous != project.properties
+        should_save
     });
 
-    if changed && let Err(error) = workspace.save_current_build_settings() {
+    if should_save && let Err(error) = workspace.save_current_build_settings() {
         workspace.message = error;
     }
 }
@@ -4774,15 +4823,24 @@ fn draw_editor_ui(
                                 .show(ui, |ui| {
                                     ui.label(RichText::new(name).strong().color(Color32::WHITE));
                                 });
-                            ui.label(RichText::new(path).small().color(theme::muted()));
+                            ui.add_sized(
+                                [ui.available_width().min(240.0), ui.available_height()],
+                                egui::Label::new(
+                                    RichText::new(&path).small().color(theme::muted()),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(path);
                         }
                         None => {
                             ui.label(RichText::new("No project open").color(theme::muted()));
                         }
                     }
-                    ui.separator();
-                    build_toolbar_settings_ui(ui, workspace);
-                    ui.separator();
+                    if workspace.current.is_some() {
+                        ui.separator();
+                        build_toolbar_settings_ui(ui, workspace);
+                        ui.separator();
+                    }
                     if workspace.current.as_ref().is_some_and(|project| {
                         project.template == ProjectTemplate::AvaloniaApp
                             && ToolchainManager::supports_fedora_package_management()
@@ -5459,6 +5517,17 @@ fn nuget_package_list_editor(ui: &mut egui::Ui, packages: &mut Vec<NuGetPackageR
 }
 
 fn validate_project_properties(properties: &ProjectProperties) -> Result<(), String> {
+    if !matches!(properties.cpp.platform.trim(), "" | "Host" | "x86" | "x64") {
+        return Err("Choose Host, x86, or x64 for the C++ target platform.".to_owned());
+    }
+    if !matches!(
+        properties.csharp.platform_target.trim(),
+        "" | "AnyCPU" | "AnyCpu" | "x86" | "x64" | "ARM" | "ARM64"
+    ) {
+        return Err(
+            "Choose Any CPU, x86, x64, ARM, or ARM64 for the C# target platform.".to_owned(),
+        );
+    }
     if !properties.cpp.standard.trim().is_empty()
         && !matches!(
             properties.cpp.standard.trim(),
@@ -5497,6 +5566,10 @@ fn validate_project_properties(properties: &ProjectProperties) -> Result<(), Str
         .chain(&properties.cpp.runtime_library_directories)
         .chain(&properties.cpp.runtime_files)
         .chain([
+            &properties.cpp.build_configuration,
+            &properties.cpp.platform,
+            &properties.csharp.build_configuration,
+            &properties.csharp.platform_target,
             &properties.csharp.target_framework,
             &properties.csharp.runtime_identifier,
             &properties.csharp.assembly_name,

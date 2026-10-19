@@ -132,6 +132,7 @@ fn actions_column(ui: &mut egui::Ui, app: &mut IdeApp) {
         false,
     ) {
         if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Fugh project", &["fugh"])
             .add_filter("Visual Studio solution", &["sln", "slnx"])
             .add_filter("Visual Studio project", &["csproj", "vcxproj"])
             .add_filter("CMake project file", &["txt"])

@@ -2,9 +2,11 @@
 Type=Application
 Name=Fugh
 Comment=Desktop IDE for C++ and C# projects
-Exec=fugh-ide
+Exec=fugh-ide --open-project %f
+Icon=fugh-logo
+MimeType=application/x-fugh-project;
 Terminal=false
 Categories=Development;IDE;
 Keywords=code;editor;C++;C#;development;
 StartupNotify=true
-StartupWMClass=Fugh
+StartupWMClass=io.github.pilotrl.fugh
