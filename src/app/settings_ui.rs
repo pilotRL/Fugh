@@ -1251,9 +1251,9 @@ fn draw_tools(app: &IdeApp, ui: &mut egui::Ui) {
         if ui.button("Install missing tools…").clicked() {
             app.open_toolchain_window();
         }
-        if !crate::toolchain::ToolchainManager::supports_fedora_package_management() {
-            ui.label("Automatic package installation is available on Fedora Linux.")
-                .on_hover_text("Other systems can install tools with their package manager.");
+        if !crate::toolchain::ToolchainManager::supports_linux_package_management() {
+            ui.label("System package installation is unavailable for this distribution.")
+                .on_hover_text("Rust and .NET can still be installed in your user account from Toolchain Setup.");
         }
     });
 }

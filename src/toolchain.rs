@@ -9,8 +9,34 @@ use std::{
 
 use eframe::egui;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+enum LinuxPackageManager {
+    Dnf,
+    Apt,
+    Pacman,
+    Zypper,
+    Apk,
+}
+
+impl LinuxPackageManager {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Dnf => "DNF (Fedora/RHEL family)",
+            Self::Apt => "APT (Debian/Ubuntu family)",
+            Self::Pacman => "pacman (Arch family)",
+            Self::Zypper => "Zypper (openSUSE/SUSE family)",
+            Self::Apk => "apk (Alpine Linux)",
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
-static IS_FEDORA: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static LINUX_PACKAGE_MANAGER: std::sync::OnceLock<Option<LinuxPackageManager>> =
+    std::sync::OnceLock::new();
+static COMMAND_AVAILABILITY: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, bool>>,
+> = std::sync::OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub struct ToolStatus {
@@ -31,7 +57,7 @@ impl PackageAction {
         match self {
             Self::InstallMissing => "Install missing tools",
             Self::InstallSelected(_) => "Install selected tools",
-            Self::UpdateInstalled => "Update installed tools",
+            Self::UpdateInstalled => "Update system packages",
         }
     }
 }
@@ -61,20 +87,44 @@ impl Default for ToolchainManager {
 }
 
 impl ToolchainManager {
-    pub fn supports_fedora_package_management() -> bool {
+    fn linux_package_manager() -> Option<LinuxPackageManager> {
         #[cfg(target_os = "linux")]
         {
-            *IS_FEDORA.get_or_init(|| {
+            *LINUX_PACKAGE_MANAGER.get_or_init(|| {
                 std::fs::read_to_string("/etc/os-release")
-                    .map(|release| is_fedora_release(&release))
-                    .unwrap_or(false)
+                    .ok()
+                    .and_then(|release| package_manager_for_os_release(&release))
             })
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
+    pub fn supports_linux_package_management() -> bool {
+        Self::linux_package_manager().is_some()
+    }
+
+    pub fn supports_fedora_release() -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            std::fs::read_to_string("/etc/os-release")
+                .is_ok_and(|release| is_fedora_release(&release))
         }
 
         #[cfg(not(target_os = "linux"))]
         {
             false
         }
+    }
+
+    pub fn package_manager_label() -> String {
+        Self::linux_package_manager().map_or_else(
+            || "unsupported Linux distribution".to_owned(),
+            |manager| manager.label().to_owned(),
+        )
     }
 
     pub fn tools(&self) -> Vec<ToolStatus> {
@@ -115,31 +165,61 @@ impl ToolchainManager {
                 }
                 PackageAction::UpdateInstalled => tool.version.is_some(),
             })
-            .flat_map(|tool| packages_for_tool(tool.name))
+            .flat_map(|tool| {
+                Self::linux_package_manager()
+                    .map(|manager| packages_for_tool(manager, tool.name))
+                    .unwrap_or_default()
+            })
             .map(|package| (*package).to_owned())
             .collect::<Vec<_>>();
-        if Self::supports_fedora_package_management() {
+        if let Some(manager) = Self::linux_package_manager() {
             let selected = |name: &str| match action {
                 PackageAction::InstallMissing => true,
                 PackageAction::InstallSelected(names) => names.iter().any(|item| item == name),
                 PackageAction::UpdateInstalled => false,
             };
-            if selected("C# debugger")
-                && tools
+            let missing = |name: &str| {
+                tools
                     .iter()
-                    .any(|tool| tool.name == "C# debugger" && tool.version.is_none())
+                    .any(|tool| tool.name == name && tool.version.is_none())
+            };
+            let needs_dotnet = (selected(".NET SDK") && missing(".NET SDK"))
+                || (selected("Roslyn language server")
+                    && missing("Roslyn language server")
+                    && missing(".NET SDK"));
+            let needs_rust = (selected("Rust compiler") || selected("Cargo"))
+                && (missing("Rust compiler") || missing("Cargo"));
+            let needs_netcoredbg = selected("C# debugger") && missing("C# debugger");
+            if (needs_dotnet || needs_rust)
+                && !command_available("curl")
+                && !command_available("wget")
             {
-                packages.extend(["curl".to_owned(), "tar".to_owned()]);
+                packages.extend(
+                    packages_for_tool(manager, "Download tools")
+                        .iter()
+                        .map(|package| (*package).to_owned()),
+                );
             }
-            if selected("Roslyn language server")
-                && tools
-                    .iter()
-                    .any(|tool| tool.name == "Roslyn language server" && tool.version.is_none())
-                && tools
-                    .iter()
-                    .any(|tool| tool.name == ".NET SDK" && tool.version.is_none())
-            {
-                packages.push("dotnet-sdk-10.0".to_owned());
+            if needs_netcoredbg && !command_available("curl") {
+                packages.extend(
+                    packages_for_tool(manager, "Download tools")
+                        .iter()
+                        .map(|package| (*package).to_owned()),
+                );
+            }
+            if (needs_netcoredbg || needs_dotnet) && !command_available("tar") {
+                packages.extend(
+                    packages_for_tool(manager, "Archive tools")
+                        .iter()
+                        .map(|package| (*package).to_owned()),
+                );
+            }
+            if (needs_dotnet || needs_rust) && !command_available("bash") {
+                packages.extend(
+                    packages_for_tool(manager, "Shell")
+                        .iter()
+                        .map(|package| (*package).to_owned()),
+                );
             }
         }
         packages.sort_unstable();
@@ -148,12 +228,21 @@ impl ToolchainManager {
     }
 
     pub fn tool_has_install_package(name: &str) -> bool {
-        !packages_for_tool(name).is_empty()
+        Self::linux_package_manager()
+            .is_some_and(|manager| !packages_for_tool(manager, name).is_empty())
     }
 
     pub fn tool_has_supported_installer(name: &str) -> bool {
         Self::tool_has_install_package(name)
-            || matches!(name, "Roslyn language server" | "C# debugger")
+            || (cfg!(target_os = "linux")
+                && matches!(
+                    name,
+                    "Rust compiler"
+                        | "Cargo"
+                        | ".NET SDK"
+                        | "Roslyn language server"
+                        | "C# debugger"
+                ))
     }
 
     pub fn netcoredbg_executable() -> Option<std::path::PathBuf> {
@@ -176,14 +265,12 @@ impl ToolchainManager {
         #[cfg(not(target_os = "linux"))]
         {
             let _ = (action, repaint);
-            Err(
-                "One-click package management is currently supported on Fedora Linux only."
-                    .to_owned(),
-            )
+            Err("In-app tool installation is currently supported on Linux only.".to_owned())
         }
 
         #[cfg(target_os = "linux")]
         {
+            let package_manager = Self::linux_package_manager();
             let install_roslyn = self.tools().iter().any(|tool| {
                 tool.name == "Roslyn language server"
                     && tool.version.is_none()
@@ -206,37 +293,96 @@ impl ToolchainManager {
                         PackageAction::UpdateInstalled => false,
                     }
             });
-            let fedora_supported = Self::supports_fedora_package_management();
-            let packages = if fedora_supported {
-                self.planned_packages(&action)
+            let install_rust_toolchain = self.tools().iter().any(|tool| {
+                matches!(tool.name, "Rust compiler" | "Cargo")
+                    && tool.version.is_none()
+                    && match &action {
+                        PackageAction::InstallMissing => true,
+                        PackageAction::InstallSelected(names) => names
+                            .iter()
+                            .any(|name| matches!(name.as_str(), "Rust compiler" | "Cargo")),
+                        PackageAction::UpdateInstalled => false,
+                    }
+            });
+            let install_dotnet_sdk = self.tools().iter().any(|tool| {
+                tool.name == ".NET SDK"
+                    && tool.version.is_none()
+                    && match &action {
+                        PackageAction::InstallMissing => true,
+                        PackageAction::InstallSelected(names) => {
+                            names.iter().any(|name| name == ".NET SDK")
+                        }
+                        PackageAction::UpdateInstalled => false,
+                    }
+            }) || (install_roslyn
+                && self
+                    .tools()
+                    .iter()
+                    .any(|tool| tool.name == ".NET SDK" && tool.version.is_none()));
+            let unsupported_tools = if package_manager.is_none() {
+                self.tools()
+                    .into_iter()
+                    .filter(|tool| {
+                        let requested = match &action {
+                            PackageAction::InstallMissing => true,
+                            PackageAction::InstallSelected(names) => {
+                                names.iter().any(|name| name == tool.name)
+                            }
+                            PackageAction::UpdateInstalled => false,
+                        };
+                        requested
+                            && tool.version.is_none()
+                            && !matches!(
+                                tool.name,
+                                "Rust compiler"
+                                    | "Cargo"
+                                    | ".NET SDK"
+                                    | "Roslyn language server"
+                                    | "C# debugger"
+                            )
+                    })
+                    .map(|tool| tool.name)
+                    .collect::<Vec<_>>()
             } else {
                 Vec::new()
             };
-            if !fedora_supported && !install_roslyn && !install_netcoredbg {
-                return Err(
-                    "One-click package management is currently supported on Fedora Linux only."
-                        .to_owned(),
-                );
+            let packages =
+                package_manager.map_or_else(Vec::new, |_| self.planned_packages(&action));
+            if package_manager.is_none()
+                && !install_roslyn
+                && !install_netcoredbg
+                && !install_dotnet_sdk
+                && !install_rust_toolchain
+            {
+                return Err("This Linux distribution is not recognized for automatic package installation. Install the required tools with its package manager; Fugh can still install .NET, Roslyn, and NetCoreDbg when their download prerequisites are present.".to_owned());
             }
-            if packages.is_empty() && !install_roslyn && !install_netcoredbg {
+            if packages.is_empty()
+                && !install_roslyn
+                && !install_netcoredbg
+                && !install_dotnet_sdk
+                && !install_rust_toolchain
+            {
                 let unsupported_missing = self
                     .tools()
                     .into_iter()
                     .filter(|tool| {
                         tool.version.is_none()
-                            && packages_for_tool(tool.name).is_empty()
+                            && package_manager.is_none_or(|manager| {
+                                packages_for_tool(manager, tool.name).is_empty()
+                            })
                             && tool.name != "Roslyn language server"
+                            && tool.name != ".NET SDK"
                     })
                     .map(|tool| tool.name)
                     .collect::<Vec<_>>();
                 return Err(match &action {
                     PackageAction::InstallMissing => {
                         if unsupported_missing.is_empty() {
-                            "No missing tools are available through Fedora package management."
+                            "No missing tools are available through this package manager."
                                 .to_owned()
                         } else {
                             format!(
-                                "{} is missing but is not available through the Fedora package installer. Install NetCoreDbg from the official release page: https://github.com/Samsung/netcoredbg/releases",
+                                "{} is missing but has no automatic installer for this distribution. Install it with the distribution's package manager or from its official project site.",
                                 unsupported_missing.join(", ")
                             )
                         }
@@ -245,7 +391,7 @@ impl ToolchainManager {
                         "No selected missing tools have a supported package.".to_owned()
                     }
                     PackageAction::UpdateInstalled => {
-                        "No installed supported tools to update.".to_owned()
+                        "No installed system packages to update.".to_owned()
                     }
                 });
             }
@@ -270,83 +416,74 @@ impl ToolchainManager {
                 .spawn(move || {
                     let mut lines = Vec::new();
                     let mut failure = None;
-                    if !packages.is_empty() {
-                        let mut command = Command::new("pkexec");
-                        command.arg("dnf");
-                        match &action {
-                            PackageAction::InstallMissing | PackageAction::InstallSelected(_) => {
-                                command.args(["install", "--assumeyes"]);
-                            }
-                            PackageAction::UpdateInstalled => {
-                                command.args(["upgrade", "--refresh", "--assumeyes"]);
-                            }
+                    if !packages.is_empty()
+                        && let Some(manager) = package_manager
+                    {
+                        failure = run_package_commands(manager, &action, &packages, &mut lines);
+                        if failure.is_none() {
+                            reset_command_availability_cache();
                         }
-                        match command.args(&packages).output() {
-                            Ok(output) => {
-                                lines.extend(
-                                    String::from_utf8_lossy(&output.stdout)
-                                        .lines()
-                                        .map(str::to_owned),
-                                );
-                                lines.extend(
-                                    String::from_utf8_lossy(&output.stderr)
-                                        .lines()
-                                        .map(str::to_owned),
-                                );
-                                if !output.status.success() {
-                                    let code = output.status.code().map_or_else(
-                                        || "terminated by signal".to_owned(),
-                                        |code| code.to_string(),
-                                    );
-                                    failure = Some(format!(
-                                        "Fedora package operation failed (exit {code})."
-                                    ));
-                                }
-                            }
-                            Err(error) => {
-                                failure = Some(format!("Could not start pkexec: {error}"))
-                            }
+                    }
+                    if failure.is_none() && install_dotnet_sdk {
+                        lines.push("Installing the latest .NET LTS SDK to ~/.dotnet using Microsoft's official installer…".to_owned());
+                        match install_dotnet_sdk_user_local() {
+                            Ok(output) => lines.extend(output),
+                            Err(error) => failure = Some(error),
+                        }
+                    }
+                    if failure.is_none() && install_rust_toolchain {
+                        lines.push("Installing the stable Rust toolchain with rustup in ~/.cargo and ~/.rustup…".to_owned());
+                        match install_rust_toolchain_user_local() {
+                            Ok(output) => lines.extend(output),
+                            Err(error) => failure = Some(error),
                         }
                     }
                     if failure.is_none() && install_roslyn {
-                        lines.push(
-                            "Installing Roslyn language server as a global .NET tool…".to_owned(),
-                        );
-                        match Command::new("dotnet")
-                            .args([
-                                "tool",
-                                "install",
-                                "--global",
-                                "roslyn-language-server",
-                                "--prerelease",
-                            ])
-                            .output()
-                        {
-                            Ok(output) => {
-                                lines.extend(
-                                    String::from_utf8_lossy(&output.stdout)
-                                        .lines()
-                                        .map(str::to_owned),
-                                );
-                                lines.extend(
-                                    String::from_utf8_lossy(&output.stderr)
-                                        .lines()
-                                        .map(str::to_owned),
-                                );
-                                if !output.status.success() {
-                                    let code = output.status.code().map_or_else(
-                                        || "terminated by signal".to_owned(),
-                                        |code| code.to_string(),
+                        if let Some(version) = probe_roslyn().version {
+                            lines.push(format!("Roslyn is already installed ({version}); keeping the existing global tool."));
+                        } else {
+                            lines.push(
+                                "Installing Roslyn language server as a global .NET tool…"
+                                    .to_owned(),
+                            );
+                            let mut command = Command::new(dotnet_executable());
+                            command.envs(dotnet_environment());
+                            match command
+                                .args([
+                                    "tool",
+                                    "install",
+                                    "--global",
+                                    "roslyn-language-server",
+                                    "--prerelease",
+                                ])
+                                .output()
+                            {
+                                Ok(output) => {
+                                    lines.extend(
+                                        String::from_utf8_lossy(&output.stdout)
+                                            .lines()
+                                            .map(str::to_owned),
                                     );
-                                    failure = Some(format!(
-                                        "Roslyn tool installation failed (exit {code})."
-                                    ));
+                                    lines.extend(
+                                        String::from_utf8_lossy(&output.stderr)
+                                            .lines()
+                                            .map(str::to_owned),
+                                    );
+                                    if !output.status.success() {
+                                        let code = output.status.code().map_or_else(
+                                            || "terminated by signal".to_owned(),
+                                            |code| code.to_string(),
+                                        );
+                                        failure = Some(format!(
+                                            "Roslyn tool installation failed (exit {code})."
+                                        ));
+                                    }
                                 }
-                            }
-                            Err(error) => {
-                                failure = Some(format!(
-                                    "Could not start dotnet to install Roslyn: {error}"
-                                ))
+                                Err(error) => {
+                                    failure = Some(format!(
+                                        "Could not start dotnet to install Roslyn: {error}"
+                                    ))
+                                }
                             }
                         }
                     }
@@ -356,6 +493,12 @@ impl ToolchainManager {
                             Ok(version) => lines.push(format!("Installed NetCoreDbg {version} in Fugh's user-local tools directory.")),
                             Err(error) => failure = Some(error),
                         }
+                    }
+                    if failure.is_none() && !unsupported_tools.is_empty() {
+                        failure = Some(format!(
+                            "Installed the user-local tools, but these system tools need manual installation on this distribution: {}.",
+                            unsupported_tools.join(", ")
+                        ));
                     }
                     *tools
                         .lock()
@@ -389,7 +532,7 @@ impl ToolchainManager {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     operation.running = false;
-                    let message = format!("Could not start Fedora package worker: {error}");
+                    let message = format!("Could not start tool installation worker: {error}");
                     operation.result = Some(Err(message.clone()));
                     message
                 })?;
@@ -433,28 +576,429 @@ impl ToolchainManager {
 }
 
 #[cfg(any(target_os = "linux", test))]
+fn package_manager_for_os_release(os_release: &str) -> Option<LinuxPackageManager> {
+    let mut id = "";
+    let mut id_like = "";
+    for line in os_release.lines() {
+        if let Some(value) = line.strip_prefix("ID=") {
+            id = value.trim_matches(['"', '\'']).trim();
+        } else if let Some(value) = line.strip_prefix("ID_LIKE=") {
+            id_like = value.trim_matches(['"', '\'']).trim();
+        }
+    }
+    let ids = std::iter::once(id)
+        .chain(id_like.split_whitespace())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+
+    if ids.iter().any(|id| {
+        matches!(
+            id.as_str(),
+            "fedora" | "rhel" | "centos" | "rocky" | "almalinux" | "ol" | "nobara"
+        )
+    }) {
+        Some(LinuxPackageManager::Dnf)
+    } else if ids.iter().any(|id| {
+        matches!(
+            id.as_str(),
+            "debian" | "ubuntu" | "linuxmint" | "pop" | "elementary" | "zorin" | "kali"
+        )
+    }) {
+        Some(LinuxPackageManager::Apt)
+    } else if ids.iter().any(|id| {
+        matches!(
+            id.as_str(),
+            "arch" | "manjaro" | "endeavouros" | "cachyos" | "artix"
+        )
+    }) {
+        Some(LinuxPackageManager::Pacman)
+    } else if ids
+        .iter()
+        .any(|id| id.starts_with("opensuse") || matches!(id.as_str(), "suse" | "sles"))
+    {
+        Some(LinuxPackageManager::Zypper)
+    } else if ids.iter().any(|id| id == "alpine") {
+        Some(LinuxPackageManager::Apk)
+    } else {
+        None
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
 fn is_fedora_release(os_release: &str) -> bool {
     os_release.lines().any(|line| {
         line.strip_prefix("ID=")
-            .map(|id| id.trim_matches('"').eq_ignore_ascii_case("fedora"))
-            .unwrap_or(false)
+            .is_some_and(|id| id.trim_matches(['"', '\'']).eq_ignore_ascii_case("fedora"))
     })
 }
 
-fn packages_for_tool(name: &str) -> &'static [&'static str] {
-    match name {
-        "Rust compiler" => &["rust"],
-        "Cargo" => &["cargo"],
-        "CMake" => &["cmake"],
-        "C++ compiler" => &["gcc-c++", "make"],
-        ".NET SDK" => &["dotnet-sdk-10.0"],
-        "clangd" => &["clang-tools-extra"],
-        "clang-format" => &["clang-tools-extra"],
-        "Roslyn language server" => &[],
-        "Git" => &["git"],
-        "Debugger" => &["gdb", "lldb"],
+fn packages_for_tool(manager: LinuxPackageManager, name: &str) -> &'static [&'static str] {
+    match (manager, name) {
+        (_, "Rust compiler" | "Cargo") => &[],
+        (_, "CMake") => &["cmake"],
+        (LinuxPackageManager::Dnf | LinuxPackageManager::Zypper, "C++ compiler") => {
+            &["gcc-c++", "make"]
+        }
+        (LinuxPackageManager::Apt, "C++ compiler") => &["g++", "make"],
+        (LinuxPackageManager::Pacman, "C++ compiler") => &["gcc", "make"],
+        (LinuxPackageManager::Apk, "C++ compiler") => &["g++", "make"],
+        (LinuxPackageManager::Dnf, "clangd" | "clang-format") => &["clang-tools-extra"],
+        (LinuxPackageManager::Apt, "clangd") => &["clangd"],
+        (LinuxPackageManager::Apt, "clang-format") => &["clang-format"],
+        (LinuxPackageManager::Pacman, "clangd" | "clang-format") => &["clang"],
+        (LinuxPackageManager::Zypper, "clangd" | "clang-format") => &["clang-tools"],
+        (LinuxPackageManager::Apk, "clangd" | "clang-format") => &["clang-extra-tools"],
+        (_, "Git") => &["git"],
+        (_, "Debugger") => &["gdb", "lldb"],
+        (LinuxPackageManager::Dnf, "Download tools") => &["curl"],
+        (LinuxPackageManager::Apt, "Download tools") => &["curl"],
+        (LinuxPackageManager::Pacman, "Download tools") => &["curl"],
+        (LinuxPackageManager::Zypper, "Download tools") => &["curl"],
+        (LinuxPackageManager::Apk, "Download tools") => &["curl"],
+        (_, "Archive tools") => &["tar"],
+        (_, "Shell") => &["bash"],
         _ => &[],
     }
+}
+
+fn command_available(command: &str) -> bool {
+    let cache = COMMAND_AVAILABILITY.get_or_init(Default::default);
+    if let Some(available) = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(command)
+        .copied()
+    {
+        return available;
+    }
+    let available = Command::new(command)
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(command.to_owned(), available);
+    available
+}
+
+#[cfg(target_os = "linux")]
+fn reset_command_availability_cache() {
+    if let Some(cache) = COMMAND_AVAILABILITY.get() {
+        cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_package_commands(
+    manager: LinuxPackageManager,
+    action: &PackageAction,
+    packages: &[String],
+    output_lines: &mut Vec<String>,
+) -> Option<String> {
+    let install = !matches!(action, PackageAction::UpdateInstalled);
+    let mut commands: Vec<Vec<String>> = Vec::new();
+    match manager {
+        LinuxPackageManager::Dnf => {
+            let mut args = if install {
+                vec![
+                    "dnf".to_owned(),
+                    "install".to_owned(),
+                    "--assumeyes".to_owned(),
+                ]
+            } else {
+                vec![
+                    "dnf".to_owned(),
+                    "upgrade".to_owned(),
+                    "--refresh".to_owned(),
+                    "--assumeyes".to_owned(),
+                ]
+            };
+            args.extend(packages.iter().cloned());
+            commands.push(args);
+        }
+        LinuxPackageManager::Apt => {
+            commands.push(vec!["apt-get".to_owned(), "update".to_owned()]);
+            let mut args = vec!["apt-get".to_owned(), "install".to_owned()];
+            if !install {
+                args.push("--only-upgrade".to_owned());
+            }
+            args.push("--yes".to_owned());
+            args.extend(packages.iter().cloned());
+            commands.push(args);
+        }
+        LinuxPackageManager::Pacman => {
+            let mut args = if install {
+                vec![
+                    "pacman".to_owned(),
+                    "-S".to_owned(),
+                    "--needed".to_owned(),
+                    "--noconfirm".to_owned(),
+                ]
+            } else {
+                vec![
+                    "pacman".to_owned(),
+                    "-Syu".to_owned(),
+                    "--noconfirm".to_owned(),
+                ]
+            };
+            args.extend(packages.iter().cloned());
+            commands.push(args);
+        }
+        LinuxPackageManager::Zypper => {
+            let mut args = vec!["zypper".to_owned(), "--non-interactive".to_owned()];
+            args.push(if install { "install" } else { "update" }.to_owned());
+            if install {
+                args.push("--no-recommends".to_owned());
+            }
+            args.extend(packages.iter().cloned());
+            commands.push(args);
+        }
+        LinuxPackageManager::Apk => {
+            if !install {
+                commands.push(vec!["apk".to_owned(), "update".to_owned()]);
+                let mut args = vec!["apk".to_owned(), "upgrade".to_owned()];
+                args.extend(packages.iter().cloned());
+                commands.push(args);
+            } else {
+                let mut args = vec!["apk".to_owned(), "add".to_owned()];
+                args.extend(packages.iter().cloned());
+                commands.push(args);
+            }
+        }
+    }
+
+    for args in commands {
+        let display = format!("pkexec {}", args.join(" "));
+        output_lines.push(format!("Running {display}"));
+        let output = match Command::new("pkexec").args(&args).output() {
+            Ok(output) => output,
+            Err(error) => {
+                return Some(format!(
+                    "Could not start pkexec. Install PolicyKit or run this command manually: {display} ({error})"
+                ));
+            }
+        };
+        output_lines.extend(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::to_owned),
+        );
+        output_lines.extend(
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .map(str::to_owned),
+        );
+        if !output.status.success() {
+            let code = output.status.code().map_or_else(
+                || "terminated by signal".to_owned(),
+                |code| code.to_string(),
+            );
+            return Some(format!(
+                "{} package operation failed (exit {code}).",
+                manager.label()
+            ));
+        }
+    }
+    None
+}
+
+fn dotnet_root() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|home| std::path::PathBuf::from(home).join(".dotnet"))
+}
+
+fn dotnet_executable() -> std::path::PathBuf {
+    if let Some(local) = dotnet_root().map(|root| root.join("dotnet"))
+        && local.is_file()
+    {
+        return local;
+    }
+    "dotnet".into()
+}
+
+fn dotnet_environment() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    let Some(root) = dotnet_root() else {
+        return Vec::new();
+    };
+    let mut paths = vec![root.join("tools"), root.clone()];
+    if let Some(existing) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&existing));
+    }
+    let mut variables = Vec::new();
+    if root.join("dotnet").is_file() {
+        variables.push(("DOTNET_ROOT".into(), root.clone().into_os_string()));
+    }
+    if let Ok(path) = std::env::join_paths(paths) {
+        variables.push(("PATH".into(), path));
+    }
+    variables
+}
+
+pub(crate) fn toolchain_environment() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    let mut paths = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        let home = std::path::PathBuf::from(home);
+        paths.push(home.join(".cargo/bin"));
+        let dotnet_root = home.join(".dotnet");
+        paths.push(dotnet_root.join("tools"));
+        paths.push(dotnet_root);
+    }
+    #[cfg(target_os = "linux")]
+    if let Ok(entries) = std::fs::read_dir("/usr/lib") {
+        paths.extend(entries.flatten().filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let bin = entry.path().join("bin");
+            (name.starts_with("llvm") && bin.is_dir()).then_some(bin)
+        }));
+    }
+    if let Some(existing) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&existing));
+    }
+    let mut variables = Vec::new();
+    if let Ok(path) = std::env::join_paths(paths) {
+        variables.push(("PATH".into(), path));
+    }
+    if let Some(root) = dotnet_root().filter(|root| root.join("dotnet").is_file()) {
+        variables.push(("DOTNET_ROOT".into(), root.into_os_string()));
+    }
+    variables
+}
+
+#[cfg(target_os = "linux")]
+fn install_rust_toolchain_user_local() -> Result<Vec<String>, String> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| {
+            "Could not locate the user's home directory for installing Rust.".to_owned()
+        })?;
+    if !command_available("bash") {
+        return Err("Installing Rust requires Bash. Install bash with your distribution's package manager, then retry.".to_owned());
+    }
+    if !command_available("curl") && !command_available("wget") {
+        return Err("Installing Rust requires curl or wget. Install one with your distribution's package manager, then retry.".to_owned());
+    }
+    let script =
+        std::env::temp_dir().join(format!("fugh-rustup-install-{}.sh", std::process::id()));
+    download_https("https://sh.rustup.rs", &script)?;
+    let result = Command::new("bash")
+        .arg(&script)
+        .args(["-y", "--profile", "minimal"])
+        .envs(toolchain_environment())
+        .output();
+    let _ = std::fs::remove_file(&script);
+    let output = result
+        .map_err(|error| format!("Could not start the official rustup installer: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let lines = stdout
+        .lines()
+        .map(str::to_owned)
+        .chain(stderr.lines().map(str::to_owned))
+        .collect::<Vec<_>>();
+    if !output.status.success() {
+        return Err(format!(
+            "The rustup installer failed (exit {}).",
+            output.status.code().unwrap_or(-1)
+        ));
+    }
+    if !home.join(".cargo/bin/rustc").is_file() || !home.join(".cargo/bin/cargo").is_file() {
+        return Err(
+            "The rustup installer finished but rustc or cargo was not found under ~/.cargo/bin."
+                .to_owned(),
+        );
+    }
+    Ok(lines)
+}
+
+#[cfg(target_os = "linux")]
+fn install_dotnet_sdk_user_local() -> Result<Vec<String>, String> {
+    let root = dotnet_root().ok_or_else(|| {
+        "Could not locate the user's home directory for installing .NET.".to_owned()
+    })?;
+    if !command_available("bash") {
+        return Err("Installing .NET requires Bash. Install bash with your distribution's package manager, then retry.".to_owned());
+    }
+    if !command_available("tar") {
+        return Err("Installing .NET requires tar. Install tar with your distribution's package manager, then retry.".to_owned());
+    }
+    if !command_available("curl") && !command_available("wget") {
+        return Err("Installing .NET requires curl or wget. Install one with your distribution's package manager, then retry.".to_owned());
+    }
+    let script =
+        std::env::temp_dir().join(format!("fugh-dotnet-install-{}.sh", std::process::id()));
+    download_https("https://dot.net/v1/dotnet-install.sh", &script)?;
+    let result = Command::new("bash")
+        .arg(&script)
+        .args(["--channel", "LTS", "--install-dir"])
+        .arg(&root)
+        .arg("--no-path")
+        .envs(dotnet_environment())
+        .output();
+    let _ = std::fs::remove_file(&script);
+    let output =
+        result.map_err(|error| format!("Could not start Microsoft's .NET installer: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let lines = stdout
+        .lines()
+        .chain(stderr.lines())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if !output.status.success() {
+        return Err(format!(
+            "Microsoft's .NET SDK installer failed (exit {}).",
+            output.status.code().unwrap_or(-1)
+        ));
+    }
+    let installed_dotnet = root.join("dotnet");
+    if !installed_dotnet.is_file() {
+        return Err("The .NET installer finished but ~/.dotnet/dotnet was not created.".to_owned());
+    }
+    Ok(lines)
+}
+
+#[cfg(target_os = "linux")]
+fn download_https(url: &str, destination: &std::path::Path) -> Result<(), String> {
+    let result = if command_available("curl") {
+        Command::new("curl")
+            .args([
+                "--fail",
+                "--location",
+                "--silent",
+                "--show-error",
+                "--proto",
+                "=https",
+                "--tlsv1.2",
+                "--output",
+            ])
+            .arg(destination)
+            .arg(url)
+            .output()
+    } else if command_available("wget") {
+        Command::new("wget")
+            .args(["--https-only", "--output-document"])
+            .arg(destination)
+            .arg(url)
+            .output()
+    } else {
+        return Err("Downloading this tool requires curl or wget.".to_owned());
+    }
+    .map_err(|error| format!("Could not start the HTTPS download: {error}"))?;
+    if !result.status.success() {
+        let _ = std::fs::remove_file(destination);
+        return Err(format!(
+            "HTTPS download failed: {}",
+            String::from_utf8_lossy(&result.stderr).trim()
+        ));
+    }
+    Ok(())
 }
 
 fn detect_tools() -> Vec<ToolStatus> {
@@ -466,7 +1010,7 @@ fn detect_tools() -> Vec<ToolStatus> {
             "C++ compiler",
             &[("g++", &["--version"]), ("clang++", &["--version"])],
         ),
-        probe(".NET SDK", "dotnet", &["--version"]),
+        probe_dotnet(),
         probe_netcoredbg(),
         probe("clangd", "clangd", &["--version"]),
         probe("clang-format", "clang-format", &["--version"]),
@@ -539,13 +1083,9 @@ fn install_netcoredbg_release() -> Result<String, String> {
         }
     };
     for prerequisite in ["curl", "tar"] {
-        if !Command::new(prerequisite)
-            .arg("--version")
-            .output()
-            .is_ok_and(|output| output.status.success())
-        {
+        if !command_available(prerequisite) {
             return Err(format!(
-                "NetCoreDbg installation requires '{prerequisite}'. On Fedora choose Install Missing Tools again so Fugh can install the prerequisites."
+                "NetCoreDbg installation requires '{prerequisite}'. Choose Install Missing Tools again so Fugh can install the prerequisite, or add it with your distribution's package manager."
             ));
         }
     }
@@ -757,7 +1297,9 @@ pub(crate) fn set_library_path_for_binary(command: &mut Command, binary: &std::p
 }
 
 fn probe_roslyn() -> ToolStatus {
-    let version = Command::new("dotnet")
+    let mut command = Command::new(dotnet_executable());
+    command.envs(dotnet_environment());
+    let version = command
         .args(["tool", "list", "--global"])
         .output()
         .ok()
@@ -784,8 +1326,26 @@ fn probe_roslyn() -> ToolStatus {
     }
 }
 
+fn probe_dotnet() -> ToolStatus {
+    let mut command = Command::new(dotnet_executable());
+    command.envs(dotnet_environment());
+    let version = command
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned());
+    ToolStatus {
+        name: ".NET SDK",
+        command: "dotnet",
+        version,
+    }
+}
+
 fn probe(name: &'static str, command: &'static str, args: &[&str]) -> ToolStatus {
-    let version = Command::new(command)
+    let mut probe = Command::new(command);
+    probe.envs(toolchain_environment());
+    let version = probe
         .args(args)
         .output()
         .ok()
@@ -826,15 +1386,33 @@ fn probe_first(name: &'static str, choices: &[(&'static str, &[&str])]) -> ToolS
 
 #[cfg(test)]
 mod tests {
-    use super::{ToolStatus, ToolchainManager, is_fedora_release, packages_for_tool, probe_first};
+    use super::{
+        LinuxPackageManager, ToolStatus, package_manager_for_os_release, packages_for_tool,
+        probe_first,
+    };
 
     #[test]
-    fn enables_package_management_only_for_fedora_os_release() {
-        assert!(is_fedora_release("NAME=Fedora Linux\nID=fedora\n"));
-        assert!(!is_fedora_release(
-            "NAME=Ubuntu\nID=ubuntu\nID_LIKE=fedora\n"
-        ));
-        assert!(!is_fedora_release("NAME=Fedora derivative\nID=example\n"));
+    fn detects_common_linux_package_manager_families() {
+        assert_eq!(
+            package_manager_for_os_release("NAME=Fedora Linux\nID=fedora\n"),
+            Some(LinuxPackageManager::Dnf)
+        );
+        assert_eq!(
+            package_manager_for_os_release("NAME=Ubuntu\nID=ubuntu\nID_LIKE=debian\n"),
+            Some(LinuxPackageManager::Apt)
+        );
+        assert_eq!(
+            package_manager_for_os_release("NAME=Debian GNU/Linux\nID=debian\n"),
+            Some(LinuxPackageManager::Apt)
+        );
+        assert_eq!(
+            package_manager_for_os_release("NAME=Arch Linux\nID=arch\n"),
+            Some(LinuxPackageManager::Pacman)
+        );
+        assert_eq!(
+            package_manager_for_os_release("NAME=Fedora derivative\nID=example\n"),
+            None
+        );
     }
 
     #[test]
@@ -855,15 +1433,24 @@ mod tests {
     }
 
     #[test]
-    fn supported_toolchains_map_only_to_known_fedora_packages() {
-        assert_eq!(packages_for_tool("C++ compiler"), ["gcc-c++", "make"]);
-        assert_eq!(packages_for_tool(".NET SDK"), ["dotnet-sdk-10.0"]);
-        assert!(packages_for_tool("unknown tool").is_empty());
-        assert!(ToolchainManager::tool_has_supported_installer(
-            "Roslyn language server"
-        ));
-        assert!(!ToolchainManager::tool_has_install_package(
-            "Roslyn language server"
-        ));
+    fn tool_packages_match_supported_linux_families() {
+        assert_eq!(
+            packages_for_tool(LinuxPackageManager::Dnf, "C++ compiler"),
+            ["gcc-c++", "make"]
+        );
+        assert_eq!(
+            packages_for_tool(LinuxPackageManager::Apt, "C++ compiler"),
+            ["g++", "make"]
+        );
+        assert_eq!(
+            packages_for_tool(LinuxPackageManager::Apt, "clangd"),
+            ["clangd"]
+        );
+        assert_eq!(
+            packages_for_tool(LinuxPackageManager::Dnf, "clang-format"),
+            ["clang-tools-extra"]
+        );
+        assert!(packages_for_tool(LinuxPackageManager::Apt, "unknown tool").is_empty());
+        assert!(packages_for_tool(LinuxPackageManager::Apt, ".NET SDK").is_empty());
     }
 }

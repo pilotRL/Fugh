@@ -835,11 +835,16 @@ fn server_worker(
     let mut child = match child {
         Ok(child) => child,
         Err(error) => {
+            let help = if language == ServerLanguage::CSharp {
+                "Fugh searched PATH and ~/.dotnet/tools. Check `dotnet tool list --global`, then use Toolchain Setup to install the .NET SDK and Roslyn if either is missing."
+            } else {
+                "Install the server or configure PATH."
+            };
             send_event(
                 &events,
                 &context,
                 json!({"method": "window/logMessage", "params": {
-                    "message": format!("Could not start {}. Install it or configure PATH. ({error})", language.command())
+                    "message": format!("Could not start {}. {help} ({error})", language.command())
                 }}),
             );
             return;
@@ -1036,6 +1041,21 @@ fn spawn_language_server(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    if language == ServerLanguage::CSharp
+        && let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+    {
+        let dotnet_root = PathBuf::from(home).join(".dotnet");
+        let mut paths = vec![dotnet_root.join("tools"), dotnet_root.clone()];
+        if let Some(existing) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&existing));
+        }
+        if let Ok(path) = std::env::join_paths(paths) {
+            command.env("PATH", path);
+        }
+        if dotnet_root.join("dotnet").is_file() {
+            command.env("DOTNET_ROOT", dotnet_root);
+        }
+    }
     match command.spawn() {
         Ok(child) => Ok(child),
         Err(error)
@@ -1044,10 +1064,12 @@ fn spawn_language_server(
         {
             let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
             if let Some(home) = home {
-                let installed = PathBuf::from(home)
-                    .join(".dotnet")
-                    .join("tools")
-                    .join("roslyn-language-server");
+                let dotnet_root = PathBuf::from(home).join(".dotnet");
+                let installed = dotnet_root.join("tools").join("roslyn-language-server");
+                let mut paths = vec![dotnet_root.join("tools"), dotnet_root.clone()];
+                if let Some(existing) = std::env::var_os("PATH") {
+                    paths.extend(std::env::split_paths(&existing));
+                }
                 let mut fallback = Command::new(installed);
                 fallback
                     .args(args)
@@ -1055,6 +1077,12 @@ fn spawn_language_server(
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::null());
+                if dotnet_root.join("dotnet").is_file() {
+                    fallback.env("DOTNET_ROOT", dotnet_root);
+                }
+                if let Ok(path) = std::env::join_paths(paths) {
+                    fallback.env("PATH", path);
+                }
                 fallback.spawn()
             } else {
                 Err(error)

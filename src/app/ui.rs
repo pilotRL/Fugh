@@ -255,7 +255,7 @@ fn draw_toolchains(app: &IdeApp, ui: &mut egui::Ui) {
     }
     ui.add_space(18.0);
     ui.heading("Toolchains");
-    ui.label("Detected from PATH on this computer:");
+    ui.label("Detected from PATH and user-local tool directories:");
     if toolchains.is_refreshing() {
         ui.spinner();
     }
@@ -277,12 +277,13 @@ fn draw_toolchains(app: &IdeApp, ui: &mut egui::Ui) {
         if ui.button("Install missing tools…").clicked() {
             app.open_toolchain_window();
         }
-        if !crate::toolchain::ToolchainManager::supports_fedora_package_management() {
-            ui.label("Automatic installation is currently supported on Fedora Linux.")
-                .on_hover_text("Other systems can install tools with their package manager.");
+        if !crate::toolchain::ToolchainManager::supports_linux_package_management() {
+            ui.label("System package installation is unavailable for this distribution.")
+                .on_hover_text("Rust and .NET can still be installed in your user account from Toolchain Setup.");
         }
     });
     ui.add_space(10.0);
-    ui.label("Fedora packages can be installed manually with:");
-    ui.code("sudo dnf install gcc-c++ cmake dotnet-sdk clang-tools-extra git gdb lldb");
+    ui.label(
+        "Use Toolchain Setup to install missing compiler, language-server, and debugger tools.",
+    );
 }

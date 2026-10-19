@@ -3150,7 +3150,7 @@ fn draw_editor_ui(
     let line_ending = live_settings.general.line_ending;
     if !workspace.current.as_ref().is_some_and(|project| {
         project.template == ProjectTemplate::AvaloniaApp
-            && ToolchainManager::supports_fedora_package_management()
+            && ToolchainManager::supports_fedora_release()
     }) {
         editor_layout.designer_mode = false;
     }
@@ -4843,7 +4843,7 @@ fn draw_editor_ui(
                     }
                     if workspace.current.as_ref().is_some_and(|project| {
                         project.template == ProjectTemplate::AvaloniaApp
-                            && ToolchainManager::supports_fedora_package_management()
+                            && ToolchainManager::supports_fedora_release()
                     }) {
                         ui.selectable_value(&mut editor_layout.designer_mode, false, "Code");
                         if ui
@@ -4980,7 +4980,7 @@ fn draw_editor_ui(
                 } else if editor_layout.designer_mode
                     && let Some(project) = workspace.current.clone()
                     && project.template == ProjectTemplate::AvaloniaApp
-                    && ToolchainManager::supports_fedora_package_management()
+                    && ToolchainManager::supports_fedora_release()
                 {
                     if let Some(code_path) = designer.show(ui, &project) {
                         if let Some(handler) = designer.take_open_code_handler() {
@@ -11376,7 +11376,7 @@ fn show_toolchains_window(
 
             egui::CentralPanel::default().show(ui, |ui| {
                 ui.heading("Toolchain setup");
-                ui.label("Installed tool versions detected from PATH and Fugh's local tools directory.");
+                ui.label("Installed tool versions detected from PATH and your user-local tool directories.");
                 ui.separator();
                 let package_operation = toolchains.package_operation();
                 ui.horizontal(|ui| {
@@ -11409,7 +11409,7 @@ fn show_toolchains_window(
                             ui.label(RichText::new(status).color(color))
                                 .on_hover_text(format!(
                                     "Executable searched {}: {}",
-                                    if tool.name == "C# debugger" { "on PATH and in Fugh's user-local tool directory" } else { "on PATH" },
+                                    if matches!(tool.name, "C# debugger" | "Rust compiler" | "Cargo" | ".NET SDK" | "Roslyn language server") { "PATH and your user-local tool directories" } else { "PATH" },
                                     tool.command,
                                 ));
                         });
@@ -11418,7 +11418,7 @@ fn show_toolchains_window(
                 ui.add_space(12.0);
                 egui::Frame::group(ui.style()).show(ui, |ui| {
                     ui.heading("Tool installation");
-                    ui.label("Install Fedora packages and approved tools from their official release feeds.");
+                    ui.label(format!("System tools use {}. Rust and .NET install in your user account; Roslyn and NetCoreDbg are downloaded from their official sources.", ToolchainManager::package_manager_label()));
                     let operation = package_operation;
                     let selection_id = egui::Id::unique("cairn-selected-tool-installs");
                     let mut selected_tools = ui
@@ -11444,7 +11444,7 @@ fn show_toolchains_window(
                     }).collect::<Vec<_>>();
                     for tool in separately_installed {
                         ui.horizontal_wrapped(|ui| {
-                            ui.colored_label(Color32::LIGHT_RED, format!("{} is missing; Fedora package install is unavailable.", tool.name));
+                            ui.colored_label(Color32::LIGHT_RED, format!("{} is missing; no automatic installer is configured for it.", tool.name));
                             if tool.name == "C# debugger" {
                                 ui.hyperlink_to("Get NetCoreDbg", "https://github.com/Samsung/netcoredbg/releases");
                             }
@@ -11452,15 +11452,18 @@ fn show_toolchains_window(
                     }
                     ui.ctx().data_mut(|data| data.insert_temp(selection_id, selected_tools.clone()));
                     ui.horizontal(|ui| {
-                        let fedora_supported =
-                            ToolchainManager::supports_fedora_package_management();
+                        let package_manager_supported =
+                            ToolchainManager::supports_linux_package_management();
+                        let dotnet_missing = toolchains.tools().iter().any(|tool| {
+                            tool.name == ".NET SDK" && tool.version.is_none()
+                        });
                         let roslyn_missing = toolchains.tools().iter().any(|tool| {
                             tool.name == "Roslyn language server" && tool.version.is_none()
                         });
                         let netcoredbg_missing = toolchains.tools().iter().any(|tool| {
                             tool.name == "C# debugger" && tool.version.is_none()
                         });
-                        let install_actions_enabled = (fedora_supported || roslyn_missing || netcoredbg_missing)
+                        let install_actions_enabled = (package_manager_supported || roslyn_missing || netcoredbg_missing || dotnet_missing)
                             && !operation.running
                             && !toolchains.is_refreshing();
                         if ui
@@ -11482,7 +11485,7 @@ fn show_toolchains_window(
                                 Some(PackageAction::InstallMissing);
                         }
                         if ui
-                            .add_enabled(fedora_supported && !operation.running && !toolchains.is_refreshing(), egui::Button::new(PackageAction::UpdateInstalled.label()))
+                            .add_enabled(package_manager_supported && !operation.running && !toolchains.is_refreshing(), egui::Button::new(PackageAction::UpdateInstalled.label()))
                             .clicked()
                         {
                             *package_confirmation
@@ -11491,8 +11494,8 @@ fn show_toolchains_window(
                                 Some(PackageAction::UpdateInstalled);
                         }
                     });
-                    if !ToolchainManager::supports_fedora_package_management() {
-                        ui.label("System package installation is Fedora only. The Roslyn server can be installed through the .NET tool feed.");
+                    if !ToolchainManager::supports_linux_package_management() {
+                        ui.label("This distribution is not recognized for system package installation. Fugh can still install Rust, .NET, Roslyn, and NetCoreDbg if their download prerequisites are available.");
                     }
                     if operation.running {
                         ui.spinner();
@@ -11541,12 +11544,30 @@ fn show_toolchains_window(
                             && toolchains.tools().iter().any(|tool| tool.name == "Roslyn language server" && tool.version.is_none());
                         let has_netcoredbg = requests_tool("C# debugger")
                             && toolchains.tools().iter().any(|tool| tool.name == "C# debugger" && tool.version.is_none());
-                        if ToolchainManager::supports_fedora_package_management()
+                        if ToolchainManager::supports_linux_package_management()
                             && !toolchains.planned_packages(&action).is_empty()
                         {
-                            ui.label("Fugh will ask Fedora's PolicyKit authorization service before changing system packages.");
-                            ui.label("Package manager command: pkexec dnf");
+                            ui.label(format!("Fugh will ask PolicyKit for permission to use {}.", ToolchainManager::package_manager_label()));
+                            ui.label("Package manager command: pkexec");
                             ui.label(format!("Packages: {}", toolchains.planned_packages(&action).join(", ")));
+                            if matches!(&action, PackageAction::UpdateInstalled)
+                                && ToolchainManager::package_manager_label().starts_with("pacman")
+                            {
+                                ui.label("Arch updates require pacman to synchronize and upgrade the system while updating these packages.");
+                            }
+                        }
+                        if requests_tool(".NET SDK")
+                            && toolchains.tools().iter().any(|tool| tool.name == ".NET SDK" && tool.version.is_none())
+                        {
+                            ui.label("Fugh will download the latest .NET LTS SDK from Microsoft and install it under ~/.dotnet. No administrator access is required.");
+                        }
+                        if requests_tool("Rust compiler") || requests_tool("Cargo") {
+                            ui.label("Fugh will install the stable Rust toolchain with rustup under ~/.cargo and ~/.rustup. No administrator access is required.");
+                        }
+                        if has_roslyn
+                            && toolchains.tools().iter().any(|tool| tool.name == ".NET SDK" && tool.version.is_none())
+                        {
+                            ui.label("The .NET SDK will be installed first because Roslyn requires it.");
                         }
                         if has_roslyn {
                             ui.label("Install Roslyn with: dotnet tool install --global roslyn-language-server --prerelease");

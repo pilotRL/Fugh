@@ -1430,7 +1430,10 @@ fn run_project_interactive(
     }
     let _ = sender.send(ProcessEvent::Output(format!("Starting {}", project.name)));
     let mut command = Command::new(&program);
-    command.args(&args).current_dir(&project.path);
+    command
+        .envs(crate::toolchain::toolchain_environment())
+        .args(&args)
+        .current_dir(&project.path);
     configure_native_runtime_environment(&mut command, project);
     #[cfg(unix)]
     {
@@ -1777,6 +1780,7 @@ fn run_mi_debugger(
     repaint.request_repaint();
     let mut debugger_command = Command::new(debugger);
     debugger_command
+        .envs(crate::toolchain::toolchain_environment())
         .args(args)
         .current_dir(cwd)
         .stdin(Stdio::piped())
@@ -1937,24 +1941,23 @@ fn launch_terminal(
                 ProjectTemplate::Console | ProjectTemplate::AvaloniaApp
             ) && debug =>
         {
-            if !crate::toolchain::ToolchainManager::supports_fedora_package_management() {
+            if !cfg!(target_os = "linux") {
                 return Err(
-                    "C# debugging through NetCoreDbg is currently supported on Fedora Linux only."
+                    "C# debugging through NetCoreDbg is currently supported on Linux only."
                         .to_owned(),
                 );
             }
-            Command::new("netcoredbg")
+            let debugger = crate::toolchain::ToolchainManager::netcoredbg_executable()
+                .unwrap_or_else(|| PathBuf::from("netcoredbg"));
+            Command::new(&debugger)
                 .arg("--help")
                 .output()
                 .map_err(|error| {
                     format!(
-                        "C# debugging requires NetCoreDbg on PATH. Install NetCoreDbg and try again. ({error})"
+                        "C# debugging requires NetCoreDbg. Install it from Toolchain Setup and try again. ({error})"
                     )
                 })?;
-            (
-                PathBuf::from("netcoredbg"),
-                netcoredbg_arguments(&csharp_assembly(project)?),
-            )
+            (debugger, netcoredbg_arguments(&csharp_assembly(project)?))
         }
         ProjectLanguage::CSharp
             if matches!(
@@ -2045,6 +2048,7 @@ fn launch_terminal(
             );
             let mut terminal_command = Command::new(&terminal);
             terminal_command
+                .envs(crate::toolchain::toolchain_environment())
                 .args(prefix)
                 .args(invocation)
                 .current_dir(&project.path);
@@ -2285,6 +2289,7 @@ fn run_checked_for_project(
     repaint.request_repaint();
     let mut command = Command::new(program);
     command
+        .envs(crate::toolchain::toolchain_environment())
         .args(&args)
         .current_dir(cwd)
         .stdout(Stdio::piped())

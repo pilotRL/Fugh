@@ -52,7 +52,9 @@ fn format_cpp(
             settings.cpp_braces.clang_value()
         )
     };
-    let mut child = Command::new("clang-format")
+    let mut formatter = Command::new("clang-format");
+    formatter.envs(crate::toolchain::toolchain_environment());
+    let mut child = formatter
         .current_dir(project_root)
         .arg(format!("--style={style}"))
         .arg(format!("--assume-filename={}", path.display()))
@@ -125,7 +127,9 @@ fn format_csharp(
             })?;
         }
         let temporary_project = temporary_root.join(project_relative);
-        let output = Command::new("dotnet")
+        let mut dotnet = Command::new("dotnet");
+        dotnet.envs(crate::toolchain::toolchain_environment());
+        let output = dotnet
             .current_dir(&temporary_root)
             .args(["format", "whitespace"])
             .arg(temporary_project)
